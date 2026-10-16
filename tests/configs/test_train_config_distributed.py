@@ -116,3 +116,21 @@ def test_reward_model_rejected_when_sharded():
     cfg.reward_model = object()  # any configured reward model triggers the check
     with pytest.raises(ValueError, match="Reward-model"):
         cfg._validate_distributed()
+
+
+@pytest.mark.parametrize("fmt", list(CheckpointFormat))
+def test_checkpoint_format_legacy_serialization(fmt):
+    import json
+    from enum import Enum
+
+    # Functional form reproduces the previous str + Enum class for comparison.
+    legacy_type = Enum(
+        "LegacyCheckpointFormat", {item.name: item.value for item in CheckpointFormat}, type=str
+    )
+    legacy_value = legacy_type[fmt.name]
+    assert draccus.encode(fmt) == draccus.encode(legacy_value)
+    assert draccus.decode(CheckpointFormat, draccus.encode(legacy_value)) is fmt
+    assert json.dumps(fmt) == json.dumps(legacy_value)
+    cfg = make_cfg(checkpoint_format=fmt)
+    restored = draccus.decode(TrainPipelineConfig, draccus.encode(cfg))
+    assert restored.checkpoint_format is fmt

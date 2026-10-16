@@ -72,6 +72,7 @@ from termcolor import colored
 from torch import Tensor, nn
 from tqdm import trange
 
+from lerobot.common.tensorboard_utils import TensorBoardLogger
 from lerobot.configs import FeatureType, parser
 from lerobot.configs.eval import EvalPipelineConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -86,7 +87,7 @@ from lerobot.envs.utils import NEW_ROLLOUT_OPTION
 from lerobot.lerobot_types import PolicyAction
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
 from lerobot.processor import PolicyProcessorPipeline
-from lerobot.utils.constants import ACTION, DONE, OBS_IMAGE, OBS_IMAGES, OBS_STR, REWARD
+from lerobot.utils.constants import ACTION, DONE, OBS_IMAGE, OBS_IMAGES, OBS_STR, PRETRAINED_MODEL_DIR, REWARD
 from lerobot.utils.device_utils import get_safe_torch_device
 from lerobot.utils.import_utils import _peft_available, register_third_party_plugins, require_package
 from lerobot.utils.io_utils import write_video
@@ -740,6 +741,17 @@ def _compile_episode_data(
 def eval_main(cfg: EvalPipelineConfig):
     logging.info(pformat(asdict(cfg)))
 
+    Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
+    tensorboard_logger = TensorBoardLogger(cfg) if cfg.tensorboard.enable else None
+    try:
+        _eval(cfg, tensorboard_logger)
+    finally:
+        if tensorboard_logger is not None:
+            tensorboard_logger.close()
+
+
+def _eval(cfg: EvalPipelineConfig, tensorboard_logger: TensorBoardLogger | None) -> None:
+    """Run standalone evaluation with cleanup owned by eval_main."""
     # Check device is available
     device = get_safe_torch_device(cfg.policy.device, log=True)
 
@@ -757,69 +769,92 @@ def eval_main(cfg: EvalPipelineConfig):
         trust_remote_code=cfg.trust_remote_code,
     )
 
-    logging.info("Making policy.")
+    try:
+        logging.info("Making policy.")
 
-    policy = make_policy(
-        cfg=cfg.policy,
-        env_cfg=cfg.env,
-        rename_map=cfg.rename_map,
-    )
-
-    policy.eval()
-
-    # The inference device is automatically set to match the detected hardware, overriding any previous device settings from training to ensure compatibility.
-    preprocessor_overrides = {
-        "device_processor": {"device": str(policy.config.device)},
-        "rename_observations_processor": {"rename_map": cfg.rename_map},
-    }
-
-    preprocessor, postprocessor = make_pre_post_processors(
-        policy_cfg=cfg.policy,
-        pretrained_path=cfg.policy.pretrained_path,
-        preprocessor_overrides=preprocessor_overrides,
-    )
-
-    # Create environment-specific preprocessor and postprocessor (e.g., for LIBERO environments)
-    env_preprocessor, env_postprocessor = make_env_pre_post_processors(env_cfg=cfg.env, policy_cfg=cfg.policy)
-
-    recording_dir = Path(cfg.output_dir) / "recordings" if cfg.eval.recording else None
-    max_episodes_rendered = 0 if cfg.eval.recording else 10
-    videos_dir = None if cfg.eval.recording else Path(cfg.output_dir) / "videos"
-
-    with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
-        info = eval_policy_all(
-            envs=envs,
-            policy=policy,
-            env_preprocessor=env_preprocessor,
-            env_postprocessor=env_postprocessor,
-            preprocessor=preprocessor,
-            postprocessor=postprocessor,
-            n_episodes=cfg.eval.n_episodes,
-            max_episodes_rendered=max_episodes_rendered,
-            videos_dir=videos_dir,
-            return_episode_data=False,
-            start_seed=cfg.seed,
-            max_parallel_tasks=cfg.env.max_parallel_tasks,
-            recording_dir=recording_dir,
-            env_features=cfg.env.features if cfg.eval.recording else None,
-            recording_repo_id=cfg.eval.recording_repo_id,
-            recording_private=cfg.eval.recording_private,
+        policy = make_policy(
+            cfg=cfg.policy,
+            env_cfg=cfg.env,
+            rename_map=cfg.rename_map,
         )
-        logger.info("Overall Aggregated Metrics:")
-        logger.info(info["overall"])
 
-        # Print per-suite stats
-        for task_group, task_group_info in info.items():
-            logger.info(f"\nAggregated Metrics for {task_group}:")
-            logger.info(task_group_info)
-    # Close all vec envs
-    close_envs(envs)
+        policy.eval()
 
-    # Save info
-    with open(Path(cfg.output_dir) / "eval_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+        # The inference device is automatically set to match the detected hardware, overriding any previous device settings from training to ensure compatibility.
+        preprocessor_overrides = {
+            "device_processor": {"device": str(policy.config.device)},
+            "rename_observations_processor": {"rename_map": cfg.rename_map},
+        }
 
-    logging.info("End of eval")
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=cfg.policy,
+            pretrained_path=cfg.policy.pretrained_path,
+            preprocessor_overrides=preprocessor_overrides,
+        )
+
+        # Create environment-specific preprocessor and postprocessor (e.g., for LIBERO environments)
+        env_preprocessor, env_postprocessor = make_env_pre_post_processors(
+            env_cfg=cfg.env, policy_cfg=cfg.policy
+        )
+
+        recording_dir = Path(cfg.output_dir) / "recordings" if cfg.eval.recording else None
+        render_videos = not cfg.eval.recording or (cfg.tensorboard.enable and cfg.tensorboard.log_videos)
+        max_episodes_rendered = 10 if render_videos else 0
+        videos_dir = Path(cfg.output_dir) / "videos" if render_videos else None
+        progress_logger = _EvalProgressLogger(tensorboard_logger) if tensorboard_logger is not None else None
+        if tensorboard_logger is not None and cfg.policy.pretrained_path is not None:
+            checkpoint = Path(cfg.policy.pretrained_path)
+            if checkpoint.name == PRETRAINED_MODEL_DIR:
+                checkpoint = checkpoint.parent
+            tensorboard_logger.log_policy(checkpoint, step=0)
+
+        with (
+            torch.no_grad(),
+            torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
+        ):
+            info = eval_policy_all(
+                envs=envs,
+                policy=policy,
+                env_preprocessor=env_preprocessor,
+                env_postprocessor=env_postprocessor,
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                n_episodes=cfg.eval.n_episodes,
+                max_episodes_rendered=max_episodes_rendered,
+                videos_dir=videos_dir,
+                return_episode_data=False,
+                start_seed=cfg.seed,
+                max_parallel_tasks=cfg.env.max_parallel_tasks,
+                task_callback=progress_logger,
+                recording_dir=recording_dir,
+                env_features=cfg.env.features if cfg.eval.recording else None,
+                recording_repo_id=cfg.eval.recording_repo_id,
+                recording_private=cfg.eval.recording_private,
+            )
+            if tensorboard_logger is not None:
+                tensorboard_logger.log_dict(
+                    {
+                        f"overall/{key}": info["overall"][key]
+                        for key in ("eval_s", "eval_ep_s", "avg_sum_reward", "avg_max_reward")
+                    },
+                    step=info["overall"]["n_episodes"],
+                    mode="eval",
+                )
+            logger.info("Overall Aggregated Metrics:")
+            logger.info(info["overall"])
+
+            # Print per-suite stats
+            for task_group, task_group_info in info.items():
+                logger.info(f"\nAggregated Metrics for {task_group}:")
+                logger.info(task_group_info)
+        # Save info
+        with open(Path(cfg.output_dir) / "eval_info.json", "w") as f:
+            json.dump(info, f, indent=2)
+
+        logging.info("End of eval")
+
+    finally:
+        close_envs(envs)
 
 
 # ---- typed payload returned by one task eval ----
@@ -829,6 +864,42 @@ class TaskMetrics(TypedDict):
     successes: list[bool]
     video_paths: list[str]
     predicted_video_paths: list[str]
+    eval_s: float
+
+
+class _EvalProgressLogger:
+    """Log completed tasks on one timeline, measured in evaluated episodes."""
+
+    def __init__(self, tensorboard_logger: TensorBoardLogger):
+        self.logger = tensorboard_logger
+        self.n_episodes = 0
+        self.n_successes = 0
+
+    def __call__(self, task_group: str, task_id: int, metrics: TaskMetrics) -> None:
+        n_episodes = len(metrics["successes"])
+        if not n_episodes:
+            return
+        n_successes = sum(metrics["successes"])
+        self.n_episodes += n_episodes
+        self.n_successes += n_successes
+        prefix = f"{task_group}/task_{task_id:02d}"
+        self.logger.log_dict(
+            {
+                "overall/pc_success": 100 * self.n_successes / self.n_episodes,
+                "overall/n_episodes": self.n_episodes,
+                f"{prefix}/success": n_successes / n_episodes,
+                f"{prefix}/pc_success": 100 * n_successes / n_episodes,
+                f"{prefix}/n_episodes": n_episodes,
+                f"{prefix}/avg_sum_reward": float(np.mean(metrics["sum_rewards"])),
+                f"{prefix}/avg_max_reward": float(np.mean(metrics["max_rewards"])),
+                f"{prefix}/eval_s": metrics["eval_s"],
+            },
+            step=self.n_episodes,
+            mode="eval",
+        )
+        for index, video_path in enumerate(metrics.get("video_paths", [])):
+            name = f"{prefix}/video" if index == 0 else f"{prefix}/video_{index:02d}"
+            self.logger.log_video(video_path, self.n_episodes, mode="eval", name=name)
 
 
 ACC_KEYS = ("sum_rewards", "max_rewards", "successes", "video_paths", "predicted_video_paths")
@@ -881,6 +952,7 @@ def eval_one(
         successes=[ep["success"] for ep in per_episode],
         video_paths=task_result.get("video_paths", []),
         predicted_video_paths=task_result.get("predicted_video_paths", []),
+        eval_s=task_result["aggregated"]["eval_s"],
     )
 
 
@@ -963,6 +1035,7 @@ def eval_policy_all(
     return_episode_data: bool = False,
     start_seed: int | None = None,
     max_parallel_tasks: int = 1,
+    task_callback: Callable[[str, int, TaskMetrics], None] | None = None,
 ) -> dict:
     """
     Evaluate a nested `envs` dict: {task_group: {task_id: vec_env}}.
@@ -970,6 +1043,9 @@ def eval_policy_all(
     accumulates per-group and overall statistics, and returns the same aggregate metrics
     schema as the single-env evaluator (avg_sum_reward / avg_max_reward / pc_success / timings)
     plus per-task infos.
+
+    task_callback, when provided, runs on the caller thread after each task completes,
+    including when tasks are evaluated in parallel.
     """
     start_t = time.time()
 
@@ -1041,6 +1117,8 @@ def eval_policy_all(
                     tg, tid, metrics = task_runner(task_group, task_id, env)
                     _accumulate_to(tg, metrics)
                     per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
+                    if task_callback is not None:
+                        task_callback(tg, tid, metrics)
                 finally:
                     env.close()
                     # Prefetch next task's workers *after* closing current env to prevent
@@ -1062,6 +1140,8 @@ def eval_policy_all(
                         tg, tid, metrics = fut.result()
                         _accumulate_to(tg, metrics)
                         per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
+                        if task_callback is not None:
+                            task_callback(tg, tid, metrics)
                     finally:
                         env.close()
     finally:

@@ -414,3 +414,26 @@ Single-task grasp-and-place with 50 clean episodes: ACT should reach **> 70% suc
 - **Community:** [Discord](https://discord.com/invite/s3KuuzsPFb) · [Hub `LeRobot` tag](https://huggingface.co/datasets?other=LeRobot) · [Dataset visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
 
 > Keep this file current. If you learn a rule that would prevent a class of user mistakes, add it here and in [`AGENTS.md`](./AGENTS.md).
+
+### Локальные логи TensorBoard
+
+Установите дополнительную зависимость: `uv sync --locked --extra training --extra tensorboard`.
+К команде обучения или RL learner добавьте `--tensorboard.enable=true`.
+Для работы только с TensorBoard задайте также `--wandb.enable=false`; оба логгера можно включить одновременно.
+
+Конфиг, метрики и видео оценки сохраняются в `<output_dir>/tensorboard`.
+В **Text → command** сохраняются команда Python-процесса и рабочая папка запуска.
+Открыть их можно командой `uv run tensorboard --logdir <output_dir>/tensorboard`
+и по адресу, который она выведет (обычно `http://localhost:6006`).
+Другую папку можно задать через `--tensorboard.log_dir=/path/to/logs`.
+При возобновлении обучения используется та же папка. Для нового запуска используйте новую папку.
+Чекпоинты остаются на диске; TensorBoard записывает ссылки на их пути.
+Отключить эти записи можно через `--tensorboard.disable_artifact=true`.
+
+Для стандартного `lerobot-eval` также доступен `--tensorboard.enable=true`.
+Один eval создаёт один Run: общий SR (`eval/overall/pc_success`) обновляется после
+каждой задачи по числу проверенных эпизодов. Время задачи и видео находятся в
+`eval/<suite>/task_XX/eval_s` и `eval/<suite>/task_XX/video`.
+Флаг `--tensorboard.log_videos=false` отключает GIF в борде, сохраняя метрики.
+Длительность видео полная; разрешение и FPS предпросмотра задаются через
+`--tensorboard.video_max_size` и `--tensorboard.video_max_fps`.

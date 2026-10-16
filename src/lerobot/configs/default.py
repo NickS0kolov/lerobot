@@ -101,6 +101,25 @@ class WandBConfig:
 
 
 @dataclass
+class TensorBoardConfig:
+    enable: bool = False
+    log_dir: str | None = None  # Defaults to output_dir/tensorboard.
+    log_videos: bool = True
+    disable_artifact: bool = False  # Disable checkpoint references.
+    flush_secs: int = 10
+    video_max_fps: int = 10
+    video_max_size: int = 256  # Maximum width or height, preserving aspect ratio.
+    # Kept for loading older train_config.json files; videos always retain their full duration.
+    video_max_duration_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.flush_secs <= 0:
+            raise ValueError("tensorboard.flush_secs must be positive")
+        if self.video_max_fps <= 0 or self.video_max_size <= 0:
+            raise ValueError("tensorboard.video_max_fps and video_max_size must be positive")
+
+
+@dataclass
 class EvalConfig:
     n_episodes: int = 50
     # `batch_size` specifies the number of environments to use in a gym.vector.VectorEnv.

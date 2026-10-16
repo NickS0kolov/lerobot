@@ -115,6 +115,7 @@ _transformers_available = is_package_available("transformers")
 _peft_available = is_package_available("peft")
 _scipy_available = is_package_available("scipy")
 _diffusers_available = is_package_available("diffusers")
+_tensorboard_available = is_package_available("tensorboard")
 _torchdiffeq_available = is_package_available("torchdiffeq")
 
 # Hardware SDKs

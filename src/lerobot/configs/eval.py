@@ -16,11 +16,14 @@ import datetime as dt
 from dataclasses import dataclass, field
 from logging import getLogger
 from pathlib import Path
+from typing import Any
+
+import draccus
 
 from lerobot import envs, policies  # noqa: F401
 
 from . import parser
-from .default import EvalConfig
+from .default import EvalConfig, TensorBoardConfig
 from .policies import PreTrainedConfig
 
 logger = getLogger(__name__)
@@ -33,6 +36,7 @@ class EvalPipelineConfig:
     # (useful for debugging). This argument is mutually exclusive with `--config`.
     env: envs.EnvConfig
     eval: EvalConfig = field(default_factory=EvalConfig)
+    tensorboard: TensorBoardConfig = field(default_factory=TensorBoardConfig)
     policy: PreTrainedConfig | None = None
     output_dir: Path | None = None
     job_name: str | None = None
@@ -77,3 +81,7 @@ class EvalPipelineConfig:
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the eval configuration, including registered policy/env types."""
+        return draccus.encode(self)  # type: ignore[no-any-return]

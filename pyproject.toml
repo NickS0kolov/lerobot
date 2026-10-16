@@ -121,6 +121,10 @@ dataset = [
     "torchcodec>=0.11.0,<0.12.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')",
     "jsonlines>=4.0.0,<5.0.0",
 ]
+tensorboard = [
+    "tensorboard>=2.18.0,<3.0.0",
+    "lerobot[av-dep]",
+]
 training = [
     "lerobot[dataset]",
     "wandb>=0.24.0,<0.28.0",
@@ -299,6 +303,7 @@ all = [
     "lerobot[dataset]",
     "lerobot[lancedb]",
     "lerobot[training]",
+    "lerobot[tensorboard]",
     "lerobot[hardware]",
     "lerobot[viz]",
     # NOTE(resolver hint): scipy is pulled in transitively via lerobot[scipy-dep] through

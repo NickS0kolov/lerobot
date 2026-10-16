@@ -105,7 +105,7 @@ TASK_SUITE_MAX_STEPS: dict[str, int] = {
 
 
 class LiberoEnv(gym.Env):
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 80}
+    metadata: dict[str, Any] = {"render_modes": ["rgb_array"], "render_fps": 20}
 
     def __init__(
         self,
@@ -161,6 +161,9 @@ class LiberoEnv(gym.Env):
         self.camera_name_mapping = camera_name_mapping
         self.num_steps_wait = num_steps_wait
         self.control_freq = control_freq
+        # One rendered frame corresponds to one control step. Keep this per
+        # instance so differently configured environments do not share FPS state.
+        self.metadata = {**self.metadata, "render_fps": control_freq}
         self.hard_reset = hard_reset
         self.episode_index = episode_index
         self.episode_length = episode_length

@@ -84,6 +84,43 @@ lerobot-eval \
   --eval.n_episodes=2
 ```
 
+### TensorBoard evaluation logs
+
+Add `--tensorboard.enable=true` to `lerobot-eval` to write the configuration,
+checkpoint reference, task metrics and videos to `<output_dir>/tensorboard`:
+
+```bash
+lerobot-eval \
+  --policy.path=your-policy-id \
+  --env.type=libero --env.task=libero_10 \
+  --eval.batch_size=1 --eval.n_episodes=1 \
+  --output_dir=outputs/eval/libero10_run1 \
+  --tensorboard.enable=true
+
+tensorboard --logdir outputs/eval/libero10_run1/tensorboard
+```
+
+One eval invocation creates one TensorBoard run. After each completed task,
+`eval/overall/pc_success` shows the success percentage across all completed
+episodes, with the episode count on the step axis. Each task has its own tags,
+such as `eval/libero_10/task_00/eval_s` and `eval/libero_10/task_00/video`.
+`eval_s` measures wall time spent evaluating that task, including MP4 saving,
+before TensorBoard GIF encoding. The final `eval/overall/eval_s` records total eval time.
+These timings are also available in `eval_info.json`.
+The Text dashboard's `command` entry records the Python process invocation and
+working directory, with shell quoting for copying the command.
+
+Use `--tensorboard.log_videos=false` for TensorBoard metrics without GIFs; the
+eval script's normal MP4 output is preserved. Videos retain their full duration.
+`--tensorboard.video_max_fps=10` and `--tensorboard.video_max_size=256` control
+the preview frame rate and longest side. Original MP4s use `env.fps`, which is
+20 FPS for LIBERO by default. `--tensorboard.log_dir` overrides the log directory;
+`--tensorboard.disable_artifact=true` skips the checkpoint reference. Model weights
+are never copied into TensorBoard logs.
+
+Use a new output directory for each experiment. Point TensorBoard at their
+shared parent directory to compare runs.
+
 ### Control mode
 
 LIBERO supports two control modes — `relative` (default) and `absolute`. Different VLA checkpoints are trained with different action parameterizations, so make sure the mode matches your policy:
