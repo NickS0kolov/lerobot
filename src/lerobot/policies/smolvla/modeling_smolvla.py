@@ -298,7 +298,54 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions_is_pad = batch.get("action_is_pad")
         loss_dict = {}
-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        alignment = None
+        if self.config.alignment_enabled:
+            losses, image_features = self.model.forward(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                state,
+                actions,
+                noise,
+                time,
+                return_image_features=True,
+            )
+            camera_keys = [key for key in self.config.image_features if key in batch]
+            student_views, teacher_views, valid_views = [], [], []
+            for camera_key, teacher_key in self.config.alignment_camera_map.items():
+                if camera_key not in camera_keys:
+                    continue
+                if teacher_key not in batch:
+                    raise ValueError(f"Missing alignment target {teacher_key} for camera {camera_key}")
+                index = camera_keys.index(camera_key)
+                target = batch[teacher_key]
+                if target.ndim == 4:  # Match prepare_images: use the latest observation.
+                    target = target[:, -1]
+                expected = (*image_features[index].shape[:2], self.config.alignment_teacher_dim)
+                if tuple(target.shape) != expected:
+                    raise ValueError(
+                        f"Alignment target {teacher_key}: expected {expected}, got {target.shape}"
+                    )
+                student_views.append(image_features[index])
+                teacher_views.append(target)
+                valid = img_masks[index]
+                if f"{teacher_key}_padding_mask" in batch:
+                    valid = valid & batch[f"{teacher_key}_padding_mask"].bool()
+                valid_views.append(valid)
+            if not student_views:
+                raise ValueError("No configured alignment cameras are present in the batch.")
+            alignment = alignment_loss(
+                torch.stack(student_views, dim=1),
+                torch.stack(teacher_views, dim=1),
+                self.model.alignment_projector,
+                torch.stack(valid_views, dim=1),
+                reduction=reduction,
+            )
+        else:
+            losses = self.model.forward(
+                images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
+            )
         original_action_dim = self.config.action_feature.shape[0]
         losses = losses[:, :, :original_action_dim]
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
@@ -319,6 +366,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
             else:
                 num_valid = ((~actions_is_pad).sum(dim=1) * losses.shape[-1]).clamp_min(1)
                 per_sample_loss = losses.sum(dim=(1, 2)) / num_valid
+            loss_dict["action_loss"] = per_sample_loss.mean().item()
+            if alignment is not None:
+                loss_dict["alignment_loss"] = alignment.mean().item()
+                per_sample_loss = per_sample_loss + self.config.alignment_weight * alignment
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
         else:
@@ -328,6 +379,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
             else:
                 num_valid = ((~actions_is_pad).sum() * losses.shape[-1]).clamp_min(1)
                 loss = losses.sum() / num_valid
+            loss_dict["action_loss"] = loss.item()
+            if alignment is not None:
+                loss_dict["alignment_loss"] = alignment.item()
+                loss = loss + self.config.alignment_weight * alignment
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
 
@@ -428,9 +483,30 @@ class SmolVLAPolicy(PreTrainedPolicy):
             "modules_to_save": [],
         }
 
+    def wrap_with_peft(self, peft_config=None, peft_cli_overrides=None):
+        """Keep the saved alignment projector frozen after PEFT creates its module copy."""
+        policy = super().wrap_with_peft(peft_config, peft_cli_overrides)
+        if self.config.alignment_enabled:
+            self.model.alignment_projector.requires_grad_(False)
+            self.model.alignment_projector.eval()
+        return policy
+
     def _validate_peft_config(self, peft_config) -> None:
         """Validate PEFT configuration for SmolVLA."""
         super()._validate_peft_config(peft_config)
+        if self.config.alignment_enabled:
+            # Preserve the random projector in adapter checkpoints, without adapting it.
+            modules = list(peft_config.modules_to_save or [])
+            if "alignment_projector" not in modules:
+                modules.append("alignment_projector")
+            peft_config.modules_to_save = modules
+            if hasattr(peft_config, "exclude_modules"):
+                excluded = peft_config.exclude_modules
+                projector_names = [f"model.alignment_projector.{index}" for index in (1, 3, 5)]
+                if isinstance(excluded, str):
+                    peft_config.exclude_modules = f"(?:{excluded})|(?:model\\.alignment_projector\\..*)"
+                else:
+                    peft_config.exclude_modules = list(excluded or []) + projector_names
         if not self.config.load_vlm_weights:
             import logging
 
@@ -461,6 +537,39 @@ def pad_tensor(tensor, max_len, pad_value=0):
     padded_tensor[:, :d] = tensor  # Efficient in-place copy
 
     return padded_tensor
+
+
+def alignment_loss(h, targets, projector, camera_mask, reduction="mean"):
+    """Cosine patch loss; frozen projector still propagates gradients into the VLM."""
+    if h.shape[:3] != targets.shape[:3] or camera_mask.shape != h.shape[:2]:
+        raise ValueError(f"Incompatible alignment shapes: {h.shape}, {targets.shape}, {camera_mask.shape}")
+    # PEFT wraps modules_to_save; select its active saved copy for float32 arithmetic.
+    if hasattr(projector, "modules_to_save"):
+        projector = projector.modules_to_save[projector.active_adapter]
+    with torch.autocast(device_type=h.device.type, enabled=False):
+        # Keep projection arithmetic in float32 even when the policy was cast to bfloat16.
+        prediction = h.float()
+        for layer in projector:
+            if isinstance(layer, nn.Linear):
+                prediction = F.linear(prediction, layer.weight.float(), layer.bias.float())
+            elif isinstance(layer, nn.LayerNorm):
+                prediction = F.layer_norm(
+                    prediction, layer.normalized_shape, layer.weight.float(), layer.bias.float(), layer.eps
+                )
+            else:
+                prediction = layer(prediction)
+        prediction = F.normalize(prediction, dim=-1)
+        valid_mask = camera_mask.to(device=h.device, dtype=torch.bool)
+        target = targets.detach().to(device=h.device, dtype=torch.float32)
+        target = F.normalize(target.masked_fill(~valid_mask[:, :, None, None], 0), dim=-1)
+        per_view = (1 - (prediction * target).sum(-1)).mean(-1)
+        valid = camera_mask.to(device=h.device, dtype=per_view.dtype)
+        per_view = per_view.masked_fill(~valid_mask, 0)
+        if reduction == "none":
+            return per_view.sum(-1) / valid.sum(-1).clamp_min(1)
+        if reduction != "mean":
+            raise ValueError(f"Unsupported alignment reduction: {reduction}")
+        return per_view.sum() / valid.sum().clamp_min(1)
 
 
 class VLAFlowMatching(nn.Module):
@@ -505,6 +614,18 @@ class VLAFlowMatching(nn.Module):
             expert_width_multiplier=self.config.expert_width_multiplier,
             device=self.config.device if self.config.device is not None else "auto",
         )
+        if config.alignment_enabled:
+            student_dim = self.vlm_with_expert.config.text_config.hidden_size
+            self.alignment_projector = nn.Sequential(
+                nn.LayerNorm(student_dim),
+                nn.Linear(student_dim, 2048),
+                nn.SiLU(),
+                nn.Linear(2048, 2048),
+                nn.SiLU(),
+                nn.Linear(2048, config.alignment_teacher_dim),
+            )
+            self.alignment_projector.requires_grad_(False)
+            self.alignment_projector.eval()
         self.state_proj = nn.Linear(
             self.config.max_state_dim, self.vlm_with_expert.config.text_config.hidden_size
         )
@@ -550,7 +671,7 @@ class VLAFlowMatching(nn.Module):
         return sample_time_beta(bsize, device, alpha=1.5, beta=1.0, scale=0.999, offset=0.001)
 
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks, state: torch.Tensor = None
+        self, images, img_masks, lang_tokens, lang_masks, state: torch.Tensor = None, image_spans=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for SmolVLM transformer processing.
@@ -587,6 +708,9 @@ class VLAFlowMatching(nn.Module):
             bsize, num_img_embs = img_emb.shape[:2]
             img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
+            if image_spans is not None:
+                start = sum(embedding.shape[1] for embedding in embs)
+                image_spans.append((start, start + num_img_embs))
             embs.append(img_emb)
             pad_masks.append(img_mask)
 
@@ -687,8 +811,17 @@ class VLAFlowMatching(nn.Module):
         return embs, pad_masks, att_masks
 
     def forward(
-        self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
-    ) -> Tensor:
+        self,
+        images,
+        img_masks,
+        lang_tokens,
+        lang_masks,
+        state,
+        actions,
+        noise=None,
+        time=None,
+        return_image_features=False,
+    ) -> Tensor | tuple[Tensor, list[Tensor]]:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -699,8 +832,9 @@ class VLAFlowMatching(nn.Module):
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
+        image_spans = [] if return_image_features else None
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, state=state
+            images, img_masks, lang_tokens, lang_masks, state=state, image_spans=image_spans
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
 
@@ -709,18 +843,28 @@ class VLAFlowMatching(nn.Module):
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
-        (_, suffix_out), _ = self.vlm_with_expert.forward(
+        layer_index = self.config.alignment_layer_index if return_image_features else None
+        vlm_outputs = self.vlm_with_expert.forward(
             attention_mask=att_2d_masks,
             position_ids=position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, suffix_embs],
             use_cache=False,
+            alignment_layer_index=layer_index,
         )
+        if layer_index is None:
+            (prefix_out, suffix_out), _ = vlm_outputs
+            alignment_source = prefix_out
+        else:
+            (prefix_out, suffix_out), _, alignment_source = vlm_outputs
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
+        if return_image_features:
+            image_features = [alignment_source[:, start:end] for start, end in image_spans]
+            return losses, image_features
         return losses
 
     def sample_actions(

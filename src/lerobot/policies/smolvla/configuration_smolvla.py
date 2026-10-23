@@ -70,6 +70,19 @@ class SmolVLAConfig(PreTrainedConfig):
     train_expert_only: bool = True
     train_state_proj: bool = True
 
+    # Optional patch alignment against precomputed teacher features (training only).
+    alignment_enabled: bool = False
+    alignment_weight: float = 0.2
+    # None: final VLM output after norm; otherwise the zero-based block output before final norm.
+    alignment_layer_index: int | None = None
+    alignment_teacher_dim: int = 1024
+    alignment_camera_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "observation.images.image": "observation.teacher.image",
+            "observation.images.wrist_image": "observation.teacher.wrist_image",
+        }
+    )
+
     # Training presets
     optimizer_lr: float = 1e-4
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
@@ -110,6 +123,14 @@ class SmolVLAConfig(PreTrainedConfig):
         super().__post_init__()
 
         """Input validation (not exhaustive)."""
+        if self.alignment_weight < 0 or self.alignment_teacher_dim <= 0:
+            raise ValueError("Alignment weight must be nonnegative and teacher dimension must be positive.")
+        if self.alignment_layer_index is not None and self.alignment_layer_index < 0:
+            raise ValueError("alignment_layer_index must be nonnegative or None.")
+        if self.alignment_enabled and self.train_expert_only:
+            raise ValueError("Alignment requires train_expert_only=False so gradients can update the VLM.")
+        if self.alignment_enabled and not self.alignment_camera_map:
+            raise ValueError("Alignment requires at least one camera-to-teacher mapping.")
         if self.n_action_steps > self.chunk_size:
             raise ValueError(
                 f"The chunk size is the upper bound for the number of action steps per model invocation. Got "

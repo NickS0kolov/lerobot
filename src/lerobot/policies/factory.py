@@ -50,6 +50,7 @@ from .evo1.configuration_evo1 import Evo1Config
 from .groot.configuration_groot import GrootConfig
 from .molmoact2.configuration_molmoact2 import MolmoAct2Config
 from .pretrained import PreTrainedPolicy
+from .smolvla.configuration_smolvla import SmolVLAConfig
 from .utils import validate_visual_features_consistency
 
 if TYPE_CHECKING or _peft_available:
@@ -246,6 +247,10 @@ def make_pre_post_processors(
                 preprocessor,
                 postprocessor,
             )
+        if isinstance(policy_cfg, SmolVLAConfig):
+            from .smolvla.processor_smolvla import reconcile_smolvla_processors
+
+            reconcile_smolvla_processors(preprocessor, policy_cfg)
         return preprocessor, postprocessor
 
     # Create new processors from the policy config, resolving the per-policy factory

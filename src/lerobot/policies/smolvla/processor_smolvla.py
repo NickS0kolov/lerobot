@@ -20,6 +20,7 @@ import torch
 
 from lerobot.processor import (
     NewLineTaskProcessorStep,
+    NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     TokenizerProcessorStep,
@@ -61,6 +62,7 @@ def make_smolvla_pre_post_processors(
     """
 
     steps = make_default_policy_processor_steps(config, dataset_stats)
+    _exclude_teacher_normalization(steps.normalize, config)
 
     input_steps = [
         steps.rename_observations,  # To mimic the same processor as pretrained one
@@ -80,3 +82,19 @@ def make_smolvla_pre_post_processors(
         steps.to_cpu,
     ]
     return make_policy_processor_pipelines(input_steps=input_steps, output_steps=output_steps)
+
+
+def _exclude_teacher_normalization(normalizer: NormalizerProcessorStep, config: SmolVLAConfig) -> None:
+    """Teacher embeddings are targets, not robot state; preserve their original values."""
+    normalizer.features = {
+        key: feature
+        for key, feature in normalizer.features.items()
+        if key not in config.alignment_camera_map.values()
+    }
+
+
+def reconcile_smolvla_processors(preprocessor: PolicyProcessorPipeline, config: SmolVLAConfig) -> None:
+    """Also exclude teacher normalization after loading processors with feature overrides."""
+    for step in preprocessor.steps:
+        if isinstance(step, NormalizerProcessorStep):
+            _exclude_teacher_normalization(step, config)

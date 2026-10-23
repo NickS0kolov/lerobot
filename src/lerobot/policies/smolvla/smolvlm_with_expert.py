@@ -414,7 +414,18 @@ class SmolVLMWithExpertModel(nn.Module):
         past_key_values: "DynamicCache | None" = None,
         inputs_embeds: list[torch.FloatTensor] = None,
         use_cache: bool | None = None,
+        alignment_layer_index: int | None = None,
     ):
+        """Run all blocks, optionally returning a pre-final-norm VLM block output as a third result."""
+        if alignment_layer_index is not None:
+            if not 0 <= alignment_layer_index < self.num_vlm_layers:
+                raise ValueError(
+                    f"alignment_layer_index must be in [0, {self.num_vlm_layers - 1}], "
+                    f"got {alignment_layer_index}."
+                )
+            if inputs_embeds[0] is None:
+                raise ValueError("Selecting an alignment layer requires VLM prefix inputs.")
+        alignment_features = None
         models = [self.get_vlm_model().text_model, self.lm_expert]
         model_layers = self.get_model_layers(models)
         for hidden_states in inputs_embeds:
@@ -497,6 +508,9 @@ class SmolVLMWithExpertModel(nn.Module):
                     outputs_embeds.append(None)
 
             inputs_embeds = outputs_embeds
+            if layer_idx == alignment_layer_index:
+                # Full VLM block output, including both residuals; retain the autograd graph.
+                alignment_features = inputs_embeds[0]
 
         # final norm
         outputs_embeds = []
@@ -506,6 +520,8 @@ class SmolVLMWithExpertModel(nn.Module):
                 outputs_embeds.append(out_emb)
             else:
                 outputs_embeds.append(None)
+        if alignment_layer_index is not None:
+            return outputs_embeds, past_key_values, alignment_features
         return outputs_embeds, past_key_values
 
     def get_attention_interface(self):

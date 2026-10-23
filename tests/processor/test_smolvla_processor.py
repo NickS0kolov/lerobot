@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PipelineFeatureType, PolicyFeature
+from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.smolvla.processor_smolvla import make_smolvla_pre_post_processors
 from lerobot.processor import (
@@ -455,3 +456,34 @@ def test_smolvla_processor_bfloat16_device_float32_normalizer():
     for stat_tensor in normalizer_step._tensor_stats[OBS_STATE].values():
         assert stat_tensor.dtype == torch.bfloat16
     # OBS_IMAGE uses IDENTITY normalization, so no stats to check
+
+
+def test_teacher_embeddings_preserved_on_creation_and_reload(tmp_path):
+    config = create_default_config()
+    stats = create_default_stats()
+    teacher_key = "observation.teacher.image"
+    config.input_features[teacher_key] = PolicyFeature(type=FeatureType.STATE, shape=(64, 1024))
+    stats[teacher_key] = {"mean": torch.full((64, 1024), 10.0), "std": torch.full((64, 1024), 2.0)}
+    with patch(
+        "lerobot.policies.smolvla.processor_smolvla.TokenizerProcessorStep", MockTokenizerProcessorStep
+    ):
+        preprocessor, postprocessor = make_smolvla_pre_post_processors(config, stats)
+    normalizer = preprocessor.steps[-1]
+    teacher = torch.randn(2, 64, 1024)
+    transition = create_transition(observation={teacher_key: teacher})
+    torch.testing.assert_close(normalizer(transition)[TransitionKey.OBSERVATION][teacher_key], teacher)
+    # Save with a deliberately stale teacher feature to exercise the pretrained overrides path.
+    normalizer.features[teacher_key] = config.input_features[teacher_key]
+    # The mock tokenizer is not serializable: remove it for this round trip.
+    preprocessor.steps = [
+        step for step in preprocessor.steps if not isinstance(step, MockTokenizerProcessorStep)
+    ]
+    preprocessor.save_pretrained(tmp_path)
+    postprocessor.save_pretrained(tmp_path)
+    loaded, _ = make_pre_post_processors(
+        policy_cfg=config,
+        pretrained_path=tmp_path,
+        preprocessor_overrides={"normalizer_processor": {"features": config.input_features}},
+    )
+    loaded_normalizer = next(step for step in loaded.steps if isinstance(step, NormalizerProcessorStep))
+    torch.testing.assert_close(loaded_normalizer(transition)[TransitionKey.OBSERVATION][teacher_key], teacher)

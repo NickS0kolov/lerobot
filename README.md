@@ -85,6 +85,56 @@ print(f"{dataset[episode_index]['action'].shape=}\n")
 
 Learn more about it in the [LeRobotDataset Documentation](https://huggingface.co/docs/lerobot/lerobot-dataset-v3).
 
+## TensorBoard Logging
+
+TensorBoard logging is now supported during training and evaluation: install the `tensorboard` extra and pass `--tensorboard.enable=true` to `lerobot-train` or `lerobot-eval`; logs default to `<output_dir>/tensorboard` (override with `--tensorboard.log_dir=...`).
+
+```bash
+uv sync --locked --extra tensorboard
+```
+
+Or install TensorBoard in your conda environment:
+
+```bash
+conda install -c conda-forge tensorboard
+```
+
+Or install LeRobot with the TensorBoard extra in editable mode from the repository root (including inside an activated conda environment):
+
+```bash
+pip install -e ".[tensorboard]"
+```
+
+The `tensorboard` extra also installs PyAV for video logging; installing only `tensorboard` with conda requires PyAV (`av`) to be available in the same environment, or disable videos with `--tensorboard.log_videos=false`. Start the viewer with:
+
+```bash
+tensorboard --logdir <output_dir>/tensorboard
+```
+
+Optional logging flags are `--tensorboard.log_videos=false`, `--tensorboard.video_max_fps=10`, `--tensorboard.video_max_size=256`, `--tensorboard.flush_secs=10`, and `--tensorboard.disable_artifact=true` (disable checkpoint references).
+
+## SmolVLA with visual feature alignment
+
+SmolVLA now supports training with visual feature alignment inspired by *Don't Blind Your VLA*. Add these flags to your SmolVLA training command:
+
+```bash
+--policy.alignment_enabled=true \
+--policy.train_expert_only=false \
+--policy.alignment_weight=0.2
+```
+
+For SmolVLA training with TensorBoard, install the combined extras from the repository root:
+
+```bash
+pip install -e ".[training,smolvla,tensorboard]"
+```
+
+Alignment itself adds no extra dependency or online teacher model. Prepare teacher features separately: each observation must contain a `[num_patches, teacher_dim]` tensor per mapped camera (normally `[64, 1024]` for the standard 512×512 student input). Teacher features bypass state normalization; missing targets for present mapped cameras or mismatched shapes raise an error. Camera names in the mapping must match the names after observation renaming.
+
+Provide precomputed teacher patch embeddings in the dataset: by default, `observation.images.image` maps to `observation.teacher.image` and `observation.images.wrist_image` to `observation.teacher.wrist_image`. Configure other pairs with `--policy.alignment_camera_map='{"observation.images.image":"observation.teacher.image"}'` and the teacher feature dimension with `--policy.alignment_teacher_dim=1024`. Teacher and student patches must have matching spatial preprocessing and patch order.
+
+The total loss is `action_loss + alignment_weight * alignment_loss`, where `alignment_loss` is the mean patchwise cosine distance, `1 - cosine_similarity(projector(student), teacher)`, averaged over valid camera views. The randomly initialized, frozen projector is `LayerNorm → Linear(2048) → SiLU → Linear(2048) → SiLU → Linear(teacher_dim)`; gradients pass through it into the VLM, while teacher targets are detached. By default, alignment uses the final normalized VLM features; `--policy.alignment_layer_index=14` selects the output of the 15th VLM block before final normalization (zero-based index). Alignment is disabled by default and teacher features are only required for training. See the [SmolVLA alignment guide](./docs/source/smolvla.mdx#aligning-visual-tokens-with-precomputed-teacher-features) and [loss implementation](./src/lerobot/policies/smolvla/modeling_smolvla.py).
+
 ## SoTA Models
 
 LeRobot implements state-of-the-art policies in pure PyTorch, covering Imitation Learning, Reinforcement Learning, Vision-Language-Action (VLA) models, World Models, and Reward Models, with more coming soon. It also provides you with the tools to instrument and inspect your training process.

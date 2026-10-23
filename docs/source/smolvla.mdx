@@ -117,3 +117,42 @@ lerobot-rollout \
 ```
 
 Depending on your evaluation setup, you can configure the duration and the number of episodes to record for your evaluation suite.
+
+## Aligning visual tokens with precomputed teacher features
+
+SmolVLA can align its visual tokens after the final VLM normalization with precomputed
+teacher patch embeddings. Enable this during training with:
+
+```bash
+--policy.alignment_enabled=true \
+--policy.train_expert_only=false \
+--policy.alignment_weight=0.2
+```
+
+By default, `observation.images.image` is paired with `observation.teacher.image`, and
+`observation.images.wrist_image` with `observation.teacher.wrist_image`. Override
+`policy.alignment_camera_map` to use other camera names (use the names after any
+observation renaming). Each teacher field contains a `[64, 1024]` tensor per observation.
+Teacher targets pass through preprocessing without state normalization and are not
+required for action inference.
+
+The loss compares corresponding patches using cosine distance through a randomly
+initialized, frozen projector (`LayerNorm → Linear(2048) → SiLU → Linear(2048) → SiLU → Linear(1024)`).
+The projector is saved with the policy; gradients flow through it into the VLM.
+The total loss is `action_loss + alignment_weight * alignment_loss`. Both components
+are logged separately. Alignment is disabled by default, and its default weight is `0.2`.
+
+To align against an intermediate VLM block, set `--policy.alignment_layer_index=14`
+for the 15th block (indices start at zero). Features are taken after the full block,
+including its MLP and residual connections, before the final VLM normalization.
+All remaining blocks still run for action prediction. Alignment gradients update the
+selected block and earlier blocks; later blocks receive gradients from the action loss.
+The default `alignment_layer_index=null` preserves alignment against the final normalized
+VLM output. The index must be smaller than the actual number of VLM layers (16 by default).
+The option is saved in the policy config and does not change action inference.
+
+Use matching spatial preprocessing and patch order for student and teacher. The standard
+512×512 student input produces 64 row-major visual tokens; image special tokens are excluded.
+Teacher feature dimensions and token counts are checked during training. Missing target
+fields for present mapped cameras raise an error. Camera padding masks exclude invalid views;
+`reduction="none"` averages valid views separately for each sample for sample weighting.

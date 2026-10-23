@@ -415,25 +415,25 @@ Single-task grasp-and-place with 50 clean episodes: ACT should reach **> 70% suc
 
 > Keep this file current. If you learn a rule that would prevent a class of user mistakes, add it here and in [`AGENTS.md`](./AGENTS.md).
 
-### Локальные логи TensorBoard
+### Local TensorBoard logs
 
-Установите дополнительную зависимость: `uv sync --locked --extra training --extra tensorboard`.
-К команде обучения или RL learner добавьте `--tensorboard.enable=true`.
-Для работы только с TensorBoard задайте также `--wandb.enable=false`; оба логгера можно включить одновременно.
+Install the optional dependency: `uv sync --locked --extra training --extra tensorboard`.
+Add `--tensorboard.enable=true` to the training or RL learner command.
+To use only TensorBoard, also set `--wandb.enable=false`; both loggers can be enabled at the same time.
 
-Конфиг, метрики и видео оценки сохраняются в `<output_dir>/tensorboard`.
-В **Text → command** сохраняются команда Python-процесса и рабочая папка запуска.
-Открыть их можно командой `uv run tensorboard --logdir <output_dir>/tensorboard`
-и по адресу, который она выведет (обычно `http://localhost:6006`).
-Другую папку можно задать через `--tensorboard.log_dir=/path/to/logs`.
-При возобновлении обучения используется та же папка. Для нового запуска используйте новую папку.
-Чекпоинты остаются на диске; TensorBoard записывает ссылки на их пути.
-Отключить эти записи можно через `--tensorboard.disable_artifact=true`.
+The configuration, metrics, and evaluation videos are saved in `<output_dir>/tensorboard`.
+**Text → command** records the Python process command and its working directory.
+View the logs by running `uv run tensorboard --logdir <output_dir>/tensorboard`
+and opening the URL it prints (usually `http://localhost:6006`).
+Set a different directory with `--tensorboard.log_dir=/path/to/logs`.
+Resuming training uses the same directory. Use a new directory for a new run.
+Checkpoints remain on disk; TensorBoard records references to their paths.
+Disable these records with `--tensorboard.disable_artifact=true`.
 
-Для стандартного `lerobot-eval` также доступен `--tensorboard.enable=true`.
-Один eval создаёт один Run: общий SR (`eval/overall/pc_success`) обновляется после
-каждой задачи по числу проверенных эпизодов. Время задачи и видео находятся в
-`eval/<suite>/task_XX/eval_s` и `eval/<suite>/task_XX/video`.
-Флаг `--tensorboard.log_videos=false` отключает GIF в борде, сохраняя метрики.
-Длительность видео полная; разрешение и FPS предпросмотра задаются через
-`--tensorboard.video_max_size` и `--tensorboard.video_max_fps`.
+The standard `lerobot-eval` command also supports `--tensorboard.enable=true`.
+Each evaluation creates one run: the overall success rate (`eval/overall/pc_success`) is updated
+after each task based on the number of evaluated episodes. Task duration and videos are available under
+`eval/<suite>/task_XX/eval_s` and `eval/<suite>/task_XX/video`.
+The `--tensorboard.log_videos=false` flag disables GIFs in TensorBoard while preserving metrics.
+Videos retain their full duration; preview resolution and FPS are controlled by
+`--tensorboard.video_max_size` and `--tensorboard.video_max_fps`.
